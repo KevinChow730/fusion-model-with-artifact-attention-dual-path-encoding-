@@ -310,3 +310,17 @@ if __name__ == "__main__":
     plot_correlation(y_true[:, 2], y_pred[:, 2],
                      os.path.join(out_dir, "corr_hr.png"),
                      title="HR correlation")
+
+    # 计算并保存预测误差到 ./output/out_error.txt
+    errors = (y_true - y_pred).astype(np.float32)  # [N, 3], 列顺序: SBP, DBP, HR
+    os.makedirs(out_dir, exist_ok=True)
+    out_err_path = os.path.join(out_dir, "out_error.txt")
+    np.savetxt(
+        out_err_path,
+        errors,
+        fmt="%.6f",
+        delimiter="\t",
+        header="SBP_err\tDBP_err\tHR_err"
+    )
+    print(f"已保存: {out_err_path}")
+
