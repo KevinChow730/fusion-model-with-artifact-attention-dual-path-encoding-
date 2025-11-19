@@ -269,4 +269,3 @@ if __name__ == "__main__":
     label_path = "./testlabel/envelope_4.txt"
     result_dir = "./"
     sliding_vad_plot(data_path, model_path, result_dir, label_path)
-    print("success")
