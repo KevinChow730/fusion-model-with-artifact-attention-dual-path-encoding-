@@ -13,13 +13,13 @@ from sklearn.model_selection import KFold
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-class VADDataset(Dataset):
+class ViTacDataset(Dataset):
     def __init__(self, data_dir, label_dir, processor, augment=False, window_size=128, step_size=1):
         from pathlib import Path
         self.data_dir = Path(data_dir)
         self.label_dir = Path(label_dir)
-        self.data_files = sorted(self.data_dir.glob("data.txt"))
-        self.label_files = sorted(self.label_dir.glob("label.txt"))
+        self.data_files = sorted(self.data_dir.glob("*.txt"), key=lambda p: p.name)
+        self.label_files = sorted(self.label_dir.glob("*.txt"), key=lambda p: p.name)
         self.processor = processor
         self.augment = augment
         self.window_size = window_size
@@ -38,59 +38,101 @@ class VADDataset(Dataset):
         data, labels = [], []
 
         for data_file, label_file in zip(self.data_files, self.label_files):
+            # --- data.txt: 3 列 ---
             file_data = []
             with open(data_file, "r") as f:
                 for ln, line in enumerate(f, 1):
                     parts = self._split_numbers(line)
-                    if len(parts) < 2:
+                    if len(parts) < 3:
                         continue
                     try:
-                        vals = [float(parts[0]), float(parts[1])]
+                        # 3 列数据
+                        vals = [float(parts[0]), float(parts[1]), float(parts[2])]
                     except ValueError:
                         continue
                     file_data.append(vals)
+            print(file_data[0:5])
 
+            # --- label.txt: 4 列 ---
             file_labels = []
             with open(label_file, "r") as f:
                 for ln, line in enumerate(f, 1):
                     parts = self._split_numbers(line)
-                    if len(parts) < 3:
-                        raise ValueError(f"标签列不足(期望≥3)，文件 `{label_file}`, 行 {ln}: {line.strip()}")
+                    if len(parts) < 4:
+                        raise ValueError(
+                            f"标签列不足(期望≥4)，文件 `{label_file}`, 行 {ln}: {line.strip()}"
+                        )
                     try:
-                        vals = [float(parts[0]), float(parts[1]), float(parts[2])]
+                        # 4 列标签
+                        vals = [
+                            float(parts[0]),
+                            float(parts[1]),
+                            float(parts[2]),
+                            float(parts[3]),
+                        ]
                     except ValueError:
-                        raise ValueError(f"标签解析失败，文件 `{label_file}`, 行 {ln}: {line.strip()}")
+                        raise ValueError(
+                            f"标签解析失败，文件 `{label_file}`, 行 {ln}: {line.strip()}"
+                        )
                     file_labels.append(vals)
+            print(file_labels[0:5])
+            print(f"数据长度: {len(file_data)}, 标签长度: {len(file_labels)}")
 
             W, S = self.window_size, self.step_size
-            Ld, Ll = int(len(file_data)/3), int(len(file_labels)/3)
+            points_per_label = W  # 你说的: 200 个数据点对应 1 个标签
 
-            for i in range(Ld, 3*Ld - W + 1, S):
-                if i + W > 3*Ll:
+            num_data = len(file_data)
+            num_labels = len(file_labels)
+
+            # 从第 0 点开始滑窗，到最后一个能完整容纳 W 点的位置
+            for i in range(0, num_data - W + 1, S):
+                # 当前窗口覆盖的数据下标 [i, i+W)
+                # 对应到标签下标范围
+                label_start = i // points_per_label
+                label_end = (i + W - 1) // points_per_label + 1  # 右开区间
+
+                # 边界保护：如果超出标签长度，就停止
+                if label_start >= num_labels:
                     break
+                label_end = min(label_end, num_labels)
 
-                window = file_data[i:i + W]
-                label_window = np.array(file_labels[i:i + W], dtype=np.float32)  # [W, 3]
-                label_mean = label_window.mean(axis=0)                           # [3]
+                # 取 data 窗口
+                window = file_data[i: i + W]  # [W, 3]
 
+                # 取覆盖到的标签并求均值 -> [4]
+                label_window = np.array(
+                    file_labels[label_start:label_end],
+                    dtype=np.float32
+                )  # [K, 4]
+                label_mean = label_window.mean(axis=0)
+
+                # 3 列数据
                 col1 = np.array([row[0] for row in window], dtype=np.float32)
                 col2 = np.array([row[1] for row in window], dtype=np.float32)
+                col3 = np.array([row[2] for row in window], dtype=np.float32)
 
                 if self.augment:
                     col1 = self.add_noise(col1)
                     col2 = self.add_noise(col2)
+                    col3 = self.add_noise(col3)
 
-                window_data = np.stack([col1, col2], axis=0).astype(np.float32)  # [2, L]
-                feature_array = self.processor.build_features(window_data)        # [4, L]
+                # window_data: [3, L]
+                window_data = np.stack([col1, col2, col3], axis=0).astype(np.float32)
+                feature_array = self.processor.build_features(window_data)
                 data.append(feature_array)
                 labels.append(label_mean.astype(np.float32))
 
-        data = np.asarray(data, dtype=np.float32)                                # [N, 4, L]
-        labels = np.asarray(labels, dtype=np.float32)                            # [N, 3] or [N*3]
+        data = np.asarray(data, dtype=np.float32)
+        labels = np.asarray(labels, dtype=np.float32)
         if labels.ndim == 1:
-            if labels.size % 3 != 0:
-                raise ValueError(f"labels 形状无效: {labels.shape}，请检查 `label.txt` 是否每行三列 SBP,DBP,HR。")
-            labels = labels.reshape(-1, 3)
+            if labels.size % 4 != 0:
+                raise ValueError(
+                    f"labels 形状无效: {labels.shape}，请检查 `label.txt` 是否每行四列。"
+                )
+            labels = labels.reshape(-1, 4)
+
+        print(data[0])
+        print(labels[0])
 
         return data, labels
 
@@ -98,50 +140,67 @@ class VADDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        sample = torch.from_numpy(self.data[idx]).float()         # [4, L]
-        label = torch.as_tensor(self.labels[idx], dtype=torch.float32)  # [3]
+        sample = torch.from_numpy(self.data[idx]).float()               # [C, L]
+        label = torch.as_tensor(self.labels[idx], dtype=torch.float32)  # [4]
         return sample, label
 
 
-def collect_predictions(model, loader, device):
-    model.eval()
-    ys, preds = [], []
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device)
-            pred = model(x).cpu().numpy()  # [B, 3]
-            ys.append(y.numpy())           # [B, 3]
-            preds.append(pred)
-    if not ys:
-        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
-    y_true = np.concatenate(ys, axis=0)
-    y_pred = np.concatenate(preds, axis=0)
-    return y_true, y_pred
+def plot_loss_curves(train_losses, val_losses, out_path, title="5-Fold Mean Loss Curves"):
+    def _to_2d(x):
+        if x is None:
+            return None
+        arr = np.asarray(x, dtype=np.float32)
+        if arr.size == 0:
+            return None
+        if arr.ndim == 1:
+            # 兼容单折输入: [n_epochs] -> [1, n_epochs]
+            arr = arr.reshape(1, -1)
+        return arr
 
+    tr = _to_2d(train_losses)
+    va = _to_2d(val_losses)
 
-def plot_bland_altman(y_true_1d, y_pred_1d, out_path, title="Bland-Altman"):
-    y_true_1d = np.asarray(y_true_1d).ravel()
-    y_pred_1d = np.asarray(y_pred_1d).ravel()
-    if y_true_1d.size == 0:
-        print("测试集为空，跳过绘图。")
+    if tr is None and va is None:
+        print("无 loss 记录，跳过绘图。")
         return
 
-    mean_vals = (y_pred_1d + y_true_1d) / 2.0
-    diff = y_pred_1d - y_true_1d
-    md = np.mean(diff)
-    sd = np.std(diff, ddof=1) if diff.size > 1 else 0.0
-    loa_upper = md + 1.96 * sd
-    loa_lower = md - 1.96 * sd
+    # 对齐到最短 epoch
+    lengths = []
+    if tr is not None:
+        lengths.append(tr.shape[1])
+    if va is not None:
+        lengths.append(va.shape[1])
+    min_len = int(min(lengths)) if lengths else 0
+    if min_len <= 0:
+        print("loss 长度异常，跳过绘图。")
+        return
 
-    plt.figure(figsize=(6, 4))
-    plt.scatter(mean_vals, diff, s=10, alpha=0.6, edgecolors="none")
-    plt.axhline(md, color="red", linestyle="--", label=f"Bias={md:.3f}")
-    plt.axhline(loa_upper, color="gray", linestyle="--", label=f"+1.96SD={loa_upper:.3f}")
-    plt.axhline(loa_lower, color="gray", linestyle="--", label=f"-1.96SD={loa_lower:.3f}")
-    plt.xlabel("Mean of prediction and reference")
-    plt.ylabel("Prediction - reference")
+    if tr is not None:
+        tr = tr[:, :min_len]
+        tr_mean = tr.mean(axis=0)
+    else:
+        tr_mean = None
+
+    if va is not None:
+        va = va[:, :min_len]
+        va_mean = va.mean(axis=0)
+    else:
+        va_mean = None
+
+    epochs = np.arange(1, min_len + 1)
+
+    plt.figure(figsize=(7, 4))
+    if tr_mean is not None:
+        plt.plot(epochs, tr_mean, label="train_loss_mean(5fold)", linewidth=1.8)
+    if va_mean is not None:
+        plt.plot(epochs, va_mean, label="val_loss_mean(5fold)", linewidth=1.8)
+
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
     plt.title(title)
     plt.legend(loc="best")
+    plt.grid(True, linewidth=0.3, alpha=0.6)
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.tight_layout()
     plt.savefig(out_path, dpi=200)
@@ -149,27 +208,39 @@ def plot_bland_altman(y_true_1d, y_pred_1d, out_path, title="Bland-Altman"):
     print(f"已保存: {out_path}")
 
 
-def train_vad(model, train_loader, val_loader, criterion, optimizer, num_epochs=1, save_path='./model/bp_artifact_best.pth'):
+def train_vitac(
+    model,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer,
+    num_epochs=1,
+    save_path="./model/bp_artifact_best.pth",
+    curve_path=None,
+    curve_title=None,
+):
     device = next(model.parameters()).device
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-    best_val_loss = float('inf')
+    best_val_loss = float("inf")
+    train_losses, val_losses = [], []
 
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
         for x, y in train_loader:
-            x = x.to(device)            # [B, 4, L]
-            y = y.to(device)            # [B, 3]
+            x = x.to(device)
+            y = y.to(device)
 
             optimizer.zero_grad()
-            pred = model(x)             # [B, 3]
+            pred = model(x)
             loss = criterion(pred, y)
             loss.backward()
             optimizer.step()
             running_loss += loss.item() * x.size(0)
 
-        train_loss = running_loss / len(train_loader.dataset)
+        train_loss = running_loss / max(1, len(train_loader.dataset))
+        train_losses.append(float(train_loss))
 
         model.eval()
         val_running = 0.0
@@ -181,8 +252,8 @@ def train_vad(model, train_loader, val_loader, criterion, optimizer, num_epochs=
                 loss = criterion(pred, y)
                 val_running += loss.item() * x.size(0)
 
-        val_count = max(1, len(val_loader.dataset))
-        val_loss = val_running / val_count
+        val_loss = val_running / max(1, len(val_loader.dataset))
+        val_losses.append(float(val_loss))
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -191,70 +262,60 @@ def train_vad(model, train_loader, val_loader, criterion, optimizer, num_epochs=
 
         print(f"Epoch {epoch + 1}/{num_epochs} | train_loss={tf(train_loss)} | val_loss={tf(val_loss)}")
 
-    return best_val_loss
+    if curve_path is not None:
+        plot_loss_curves(
+            train_losses,
+            val_losses,
+            curve_path,
+            title=curve_title or "train/val loss",
+        )
+
+    return best_val_loss, train_losses, val_losses
 
 
 def tf(x):
     return f"{x:.6f}"
 
 
-def plot_correlation(y_true_1d, y_pred_1d, out_path, title="Correlation"):
-    y_true_1d = np.asarray(y_true_1d).ravel()
-    y_pred_1d = np.asarray(y_pred_1d).ravel()
-    if y_true_1d.size == 0:
-        print("测试集为空，跳过绘图。")
-        return
-
-    r = float(np.corrcoef(y_true_1d, y_pred_1d)[0, 1]) if y_true_1d.size > 1 else 0.0
-    k, b = np.polyfit(y_true_1d, y_pred_1d, 1) if y_true_1d.size > 1 else (1.0, 0.0)
-
-    x_min, x_max = np.min(y_true_1d), np.max(y_true_1d)
-    xs = np.linspace(x_min, x_max, 100)
-
-    plt.figure(figsize=(6, 4))
-    plt.scatter(y_true_1d, y_pred_1d, s=10, alpha=0.6, edgecolors="none")
-    plt.plot([x_min, x_max], [x_min, x_max], "k--", linewidth=1, label="y=x")
-    plt.plot(xs, k * xs + b, "r-", linewidth=1, label=f"fit: y={k:.3f}x+{b:.3f}")
-    plt.xlabel("Reference")
-    plt.ylabel("Prediction")
-    plt.title(f"{title} (r={r:.3f}, R^2={r*r:.3f})")
-    plt.legend(loc="best")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
-    print(f"已保存: {out_path}")
-
-
 if __name__ == "__main__":
-    data_dir = "./dataset/0826"
-    label_dir = "./dataset/0826"
+    data_dir = "./data/dynamic"
+    label_dir = "./label/dynamic"
     base_model_dir = "./model"
     os.makedirs(base_model_dir, exist_ok=True)
 
+    out_dir = "./output"
+    os.makedirs(out_dir, exist_ok=True)
+
     augment = True
-    window_size = 128
+    window_size = 200
     batch_size = 16
-    num_epochs = 100
+    num_epochs = 150
     seed = 42
 
     processor = Process(model_path=None)
-    dataset = VADDataset(data_dir, label_dir, processor=processor,
-                         augment=augment, window_size=window_size, step_size=10)
+    dataset = ViTacDataset(
+        data_dir,
+        label_dir,
+        processor=processor,
+        augment=augment,
+        window_size=window_size,
+        step_size=10,
+    )
 
     N = len(dataset)
     train_len = int(0.6 * N)
     val_len = int(0.2 * N)
     test_len = N - train_len - val_len
     train_base, val_fixed, test_fixed = random_split(
-        dataset, [train_len, val_len, test_len],
-        generator=torch.Generator().manual_seed(seed)
+        dataset,
+        [train_len, val_len, test_len],
+        generator=torch.Generator().manual_seed(seed),
     )
 
     print(f"使用设备: {device}")
     print(f"数据集大小: {N}")
     print(f"训练基集: {len(train_base)}, 验证集: {len(val_fixed)}, 测试集: {len(test_fixed)}")
-    # 交叉验证训练
+
     kf = KFold(n_splits=5, shuffle=True, random_state=seed)
     fold_best_losses = []
     fold_paths = []
@@ -266,61 +327,26 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_fold, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_fold, batch_size=batch_size, shuffle=False)
 
-        model = Trans(input_dim=window_size).to(device)
+        model = Trans(input_len=window_size).to(device)
         criterion = nn.MSELoss()
-        optimizer = optim.Adam(model.parameters(), lr=1e-4)
+        optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
         save_path = os.path.join(base_model_dir, f"bp_cv_fold_{fold}.pth")
-        best_loss = train_vad(model, train_loader, val_loader, criterion, optimizer,
-                              num_epochs=num_epochs, save_path=save_path)
+        curve_path = os.path.join(out_dir, f"loss_curve_fold_{fold}.png")
+
+        best_loss, train_losses, val_losses = train_vitac(
+            model,
+            train_loader,
+            val_loader,
+            criterion,
+            optimizer,
+            num_epochs=num_epochs,
+            save_path=save_path,
+            curve_path=curve_path,
+            curve_title=f"Fold {fold} loss curves",
+        )
 
         fold_best_losses.append(best_loss)
         fold_paths.append(save_path)
         print(f"[Fold {fold}] 最优验证损失: {tf(best_loss)} | 权重文件: `{save_path}`")
-
-    best_fold = int(np.argmin(fold_best_losses)) + 1
-    best_path = fold_paths[best_fold - 1]
-    print(f"选择验证损失最小的折: Fold {best_fold} -> `{best_path}`")
-
-    # 在测试集上评估并绘制 Bland-Altman 图
-    test_loader = DataLoader(test_fixed, batch_size=batch_size, shuffle=False)
-    model = Trans(input_dim=window_size).to(device)
-
-    state = torch.load(best_path, map_location=device)
-    model.load_state_dict(state)
-
-    y_true, y_pred = collect_predictions(model, test_loader, device)
-
-    out_dir = "./output"
-    plot_bland_altman(y_true[:, 0], y_pred[:, 0],
-                      os.path.join(out_dir, "bland_altman_sbp.png"),
-                      title="SBP (mmHg)")
-    plot_bland_altman(y_true[:, 1], y_pred[:, 1],
-                      os.path.join(out_dir, "bland_altman_dbp.png"),
-                      title="DBP (mmHg)")
-    plot_bland_altman(y_true[:, 2], y_pred[:, 2],
-                      os.path.join(out_dir, "bland_altman_hr.png"),
-                      title="HR (bpm)")
-    plot_correlation(y_true[:, 0], y_pred[:, 0],
-                     os.path.join(out_dir, "corr_sbp.png"),
-                     title="SBP correlation")
-    plot_correlation(y_true[:, 1], y_pred[:, 1],
-                     os.path.join(out_dir, "corr_dbp.png"),
-                     title="DBP correlation")
-    plot_correlation(y_true[:, 2], y_pred[:, 2],
-                     os.path.join(out_dir, "corr_hr.png"),
-                     title="HR correlation")
-
-    # 计算并保存预测误差到 ./output/out_error.txt
-    errors = (y_true - y_pred).astype(np.float32)  # [N, 3], 列顺序: SBP, DBP, HR
-    os.makedirs(out_dir, exist_ok=True)
-    out_err_path = os.path.join(out_dir, "out_error.txt")
-    np.savetxt(
-        out_err_path,
-        errors,
-        fmt="%.6f",
-        delimiter="\t",
-        header="SBP_err\tDBP_err\tHR_err"
-    )
-    print(f"已保存: {out_err_path}")
 

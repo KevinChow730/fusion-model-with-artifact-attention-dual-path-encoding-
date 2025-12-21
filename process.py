@@ -18,7 +18,7 @@ class Process:
         d_model, input_dim = int(w.shape[0]), int(w.shape[1])
 
         # 实例化与 checkpoint 完全匹配的模型
-        model = Trans(input_dim=input_dim, d_model=d_model).to(self.device)
+        model = Trans(input_len=input_dim, d_model=d_model).to(self.device)
 
         # 严格加载
         model.load_state_dict(state, strict=True)
@@ -27,28 +27,40 @@ class Process:
 
     def build_features(self, window_data: np.ndarray) -> np.ndarray:
         """
-        将两列时间序列转换为特征: 通道顺序 `[a_time, a_freq, b_time, b_freq]`，形状为 `[4, L]`。
+        将三列时间序列转换为特征:
+        通道顺序 `[a_time, a_freq, b_time, b_freq, c_time, c_freq]`，
+        形状为 `[6, L]`。
+
         参数:
-            window_data: np.ndarray，形状 `[2, L]`
+            window_data: np.ndarray，形状 `[3, L]`
         返回:
-            np.ndarray，形状 `[4, L]`，dtype=float32
+            np.ndarray，形状 `[6, L]`，dtype=float32
         """
-        if window_data.ndim != 2 or window_data.shape[0] != 2:
-            raise ValueError("window_data 形状必须为 `[2, L]`")
-        time = window_data.astype(np.float32)  # [2, L]
+        if window_data.ndim != 2 or window_data.shape[0] != 3:
+            raise ValueError("window_data 形状必须为 `[3, L]`")
+
+        time = window_data.astype(np.float32)  # [3, L]
         L = time.shape[1]
-        fft_mag = (np.abs(np.fft.fft(time, axis=-1)) / float(L)).astype(np.float32)  # [2, L]
-        chw = np.stack([time[0], fft_mag[0], time[1], fft_mag[1]], axis=0).astype(np.float32)  # [4, L]
-        return chw
+        fft_mag = (np.abs(np.fft.fft(time, axis=-1)) / float(L)).astype(np.float32)  # [3, L]
+
+        # 通道顺序: a\_time, a\_freq, b\_time, b\_freq, c\_time, c\_freq
+        features = np.stack(
+            [time[0], fft_mag[0],
+             time[1], fft_mag[1],
+             time[2], fft_mag[2]],
+            axis=0
+        ).astype(np.float32)  # [6, L]
+
+        return features
 
     def process_window(self, window_data: np.ndarray):
         """
-        推理入口：将`window_data`转换为 `[1, 4, L]` 后送入模型，返回预测结果。
+        推理入口：将`window_data`转换为 `[1, 6, L]` 后送入模型，返回预测结果。
         """
         if self.model is None:
             raise RuntimeError("未加载模型。实例化 `process` 时请提供 `model_path`。")
-        chw = self.build_features(window_data)                     # [4, L] (np)
-        input_tensor = torch.from_numpy(chw).unsqueeze(0).float()  # [1, 4, L]
+        features = self.build_features(window_data)                     # [6, L] (np)
+        input_tensor = torch.from_numpy(features).unsqueeze(0).float()  # [1, 6, L]
         input_tensor = input_tensor.to(self.device)
 
         self.model.eval()

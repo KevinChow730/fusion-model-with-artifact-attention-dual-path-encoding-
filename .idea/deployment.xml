@@ -6,7 +6,7 @@
       <paths name="ryan@172.16.32.80:22 password">
         <serverdata>
           <mappings>
-            <mapping deploy="/Monitorartifact_v1" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/ViTac" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
