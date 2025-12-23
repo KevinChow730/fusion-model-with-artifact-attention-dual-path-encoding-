@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from model import Trans
+from model import Trans, TransNoPressure, TransNoPressDifAttn
 
 
 class Process:
@@ -17,8 +17,10 @@ class Process:
         w = state["enc_a.conv_l1.weight"]
         d_model, input_dim = int(w.shape[0]), int(w.shape[1])
 
-        # 实例化与 checkpoint 完全匹配的模型
-        model = Trans(input_len=input_dim, d_model=d_model).to(self.device)
+        ''' 模型选择 '''
+        # model = Trans(input_len=input_dim, d_model=d_model).to(self.device)
+        model = TransNoPressure(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = TransNoPressDifAttn(input_len=input_dim, d_model=d_model).to(self.device)
 
         # 严格加载
         model.load_state_dict(state, strict=True)

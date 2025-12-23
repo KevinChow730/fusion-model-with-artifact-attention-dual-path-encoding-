@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 
-from model import Trans
+from model import Trans, TransNoPressure, TransNoPressDifAttn
 from process import Process
 
 from train import ViTacDataset
@@ -87,8 +87,8 @@ def plot_correlation(y_true_1d, y_pred_1d, out_path, title="Correlation"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="./data/dynamic")
-    parser.add_argument("--label_dir", type=str, default="./label/dynamic")
+    parser.add_argument("--data_dir", type=str, default="./data/static")
+    parser.add_argument("--label_dir", type=str, default="./label/static")
     parser.add_argument("--best_path", type=str, required=True)
     parser.add_argument("--out_dir", type=str, default="./output")
     parser.add_argument("--window_size", type=int, default=200)
@@ -126,7 +126,11 @@ def main():
 
     test_loader = DataLoader(test_fixed, batch_size=args.batch_size, shuffle=False)
 
-    model = Trans(input_len=args.window_size).to(device)
+    ''' 模型选择'''
+    # model = Trans(input_len=args.window_size).to(device)
+    model = TransNoPressure(input_len=args.window_size).to(device)
+    # model = TransNoPressDifAttn(input_len=args.window_size).to(device)
+
     state = torch.load(args.best_path, map_location=device)
     model.load_state_dict(state)
 

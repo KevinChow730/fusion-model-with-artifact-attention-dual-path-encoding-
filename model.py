@@ -146,3 +146,148 @@ class Trans(nn.Module):
             out = self.fc3(x)
             return out
 
+
+class TransNoPressDifAttn(nn.Module):
+    """
+    方案A: 输入仍为 [B, 6, L]，但不使用 pressure 融合（不走 cross-attn）。
+    输出仍为 [B, 4]（按 out_num 拼接）。
+    """
+    def __init__(self, input_len=200, d_model=256, out_num=1, num_heads=16, drop_p: float = 0):
+        super().__init__()
+        self.input_len = input_len
+        self.d_model = d_model
+
+        self.enc_red = EncodeBlock(input_dim=input_len, d_model=d_model)
+        self.enc_ir = EncodeBlock(input_dim=input_len, d_model=d_model)
+        self.enc_pressure = EncodeBlock(input_dim=input_len, d_model=d_model)  # 保留以保证结构/参数接口一致
+
+        self.alpha = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+        self.beta = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)  # 保留
+
+        self.cross_attn = CrossDiffAttention(
+            dim=d_model, num_heads=num_heads, qkv_bias=True,
+            attn_drop=drop_p, proj_drop=drop_p, lambda_init=0.8
+        )  # 保留但 forward 不用
+
+        self.dropout_enc = nn.Dropout(p=drop_p)
+        self.dropout_attn = nn.Dropout(p=drop_p)
+
+        self.dec_SBP = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_DBP = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_SpO2 = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_HR = DecodeBlock(input_dim=input_len, d_model=d_model)
+
+        self.head_SBP = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_DBP = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_SpO2 = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_HR = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 3 and x.size(1) == 6 and x.size(2) == self.input_len, \
+            "输入形状应为 [B, 6, input_len]"
+
+        red = x[:, 0:2, :]
+        ir = x[:, 2:4, :]
+
+        enc_red = self.enc_red(red)  # [B, 1, d_model]
+        enc_ir = self.enc_ir(ir)
+
+        alpha = self.alpha.view(1, 1, 1)
+        beta = self.beta.view(1, 1, 1)
+
+        ppg_encoded = alpha * enc_red + beta * enc_ir
+        ppg_encoded = self.norm1(ppg_encoded)
+        ppg_encoded = self.dropout_enc(ppg_encoded)
+
+        shared_latent = ppg_encoded
+
+        dec_feat_SBP = self.dec_SBP(shared_latent)
+        dec_feat_DBP = self.dec_DBP(shared_latent)
+        dec_feat_SpO2 = self.dec_SpO2(shared_latent)
+        dec_feat_HR = self.dec_HR(shared_latent)
+
+        y_SBP = self.head_SBP(dec_feat_SBP)
+        y_DBP = self.head_DBP(dec_feat_DBP)
+        y_SpO2 = self.head_SpO2(dec_feat_SpO2)
+        y_HR = self.head_HR(dec_feat_HR)
+
+        return torch.cat([y_SBP, y_DBP, y_SpO2, y_HR], dim=1)
+
+
+class TransNoPressure(nn.Module):
+    """
+    方案B: 输入仍为 [B, 6, L]，保留 cross-attn，但用 ppg_encoded 作为 key/value，
+    即 pressure 信息不进入融合，结构/正则形式保留。
+    输出仍为 [B, 4]（按 out_num 拼接）。
+    """
+    def __init__(self, input_len=200, d_model=256, out_num=1, num_heads=16, drop_p: float = 0):
+        super().__init__()
+        self.input_len = input_len
+        self.d_model = d_model
+
+        self.enc_red = EncodeBlock(input_dim=input_len, d_model=d_model)
+        self.enc_ir = EncodeBlock(input_dim=input_len, d_model=d_model)
+        self.enc_pressure = EncodeBlock(input_dim=input_len, d_model=d_model)  # 保留但 forward 不用其输出
+
+        self.alpha = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+        self.beta = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)  # 保留
+
+        self.cross_attn = CrossDiffAttention(
+            dim=d_model, num_heads=num_heads, qkv_bias=True,
+            attn_drop=drop_p, proj_drop=drop_p, lambda_init=0.8
+        )
+
+        self.dropout_enc = nn.Dropout(p=drop_p)
+        self.dropout_attn = nn.Dropout(p=drop_p)
+
+        self.dec_SBP = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_DBP = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_SpO2 = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_HR = DecodeBlock(input_dim=input_len, d_model=d_model)
+
+        self.head_SBP = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_DBP = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_SpO2 = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_HR = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 3 and x.size(1) == 6 and x.size(2) == self.input_len, \
+            "输入形状应为 [B, 6, input_len]"
+
+        red = x[:, 0:2, :]
+        ir = x[:, 2:4, :]
+
+        enc_red = self.enc_red(red)  # [B, 1, d_model]
+        enc_ir = self.enc_ir(ir)
+
+        alpha = self.alpha.view(1, 1, 1)
+        beta = self.beta.view(1, 1, 1)
+
+        ppg_encoded = alpha * enc_red + beta * enc_ir
+        ppg_encoded = self.norm1(ppg_encoded)
+        ppg_encoded = self.dropout_enc(ppg_encoded)
+
+        ppg_res = ppg_encoded
+        kv = ppg_encoded  # 用 ppg 作为 key/value
+        attn_output = self.cross_attn(ppg_encoded, kv)  # [B, 1, d_model]
+        attn_output = self.dropout_attn(attn_output)
+
+        shared_latent = ppg_res + attn_output
+
+        dec_feat_SBP = self.dec_SBP(shared_latent)
+        dec_feat_DBP = self.dec_DBP(shared_latent)
+        dec_feat_SpO2 = self.dec_SpO2(shared_latent)
+        dec_feat_HR = self.dec_HR(shared_latent)
+
+        y_SBP = self.head_SBP(dec_feat_SBP)
+        y_DBP = self.head_DBP(dec_feat_DBP)
+        y_SpO2 = self.head_SpO2(dec_feat_SpO2)
+        y_HR = self.head_HR(dec_feat_HR)
+
+        return torch.cat([y_SBP, y_DBP, y_SpO2, y_HR], dim=1)

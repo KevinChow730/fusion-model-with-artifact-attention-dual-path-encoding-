@@ -5,7 +5,7 @@ import re
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Dataset, Subset
-from model import Trans
+from model import Trans, TransNoPressure, TransNoPressDifAttn
 from process import Process
 import matplotlib.pyplot as plt
 from sklearn.model_selection import KFold
@@ -278,8 +278,8 @@ def tf(x):
 
 
 if __name__ == "__main__":
-    data_dir = "./data/dynamic"
-    label_dir = "./label/dynamic"
+    data_dir = "./data/static"
+    label_dir = "./label/static"
     base_model_dir = "./model"
     os.makedirs(base_model_dir, exist_ok=True)
 
@@ -316,7 +316,7 @@ if __name__ == "__main__":
     print(f"数据集大小: {N}")
     print(f"训练基集: {len(train_base)}, 验证集: {len(val_fixed)}, 测试集: {len(test_fixed)}")
 
-    kf = KFold(n_splits=5, shuffle=True, random_state=seed)
+    kf = KFold(n_splits=2, shuffle=True, random_state=seed)
     fold_best_losses = []
     fold_paths = []
 
@@ -327,7 +327,11 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_fold, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_fold, batch_size=batch_size, shuffle=False)
 
-        model = Trans(input_len=window_size).to(device)
+        ''' 模型选择 '''
+        # model = Trans(input_len=window_size).to(device)
+        model = TransNoPressure(input_len=window_size).to(device)
+        # model = TransNoPressDifAttn(input_len=window_size).to(device)
+
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
 

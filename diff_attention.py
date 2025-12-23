@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True):
         super().__init__()
