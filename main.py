@@ -1,271 +1,195 @@
 import os
+import re
+import csv
 import numpy as np
-import matplotlib
+import torch
 import matplotlib.pyplot as plt
+
+from model import Trans  # 如需换模型：TransNoPressure / TransNoPressDifAttn
 from process import Process
-from sklearn.metrics import r2_score
-from scipy import stats
 
 
-matplotlib.use("Agg")  # 使用无界面后端
+def _split_numbers(line: str):
+    return [p for p in re.split(r"[,\s]+", line.strip()) if p]
 
 
-def sliding_vad_plot(data_path: str, model_path: str, result_dir: str, label_path: str):
-    # 确保结果目录存在
-    os.makedirs(result_dir, exist_ok=True)
+def load_static_data(data_path: str):
+    rows = []
+    with open(data_path, "r", encoding="utf-8") as f:
+        for ln, line in enumerate(f, 1):
+            parts = _split_numbers(line)
+            if len(parts) < 3:
+                continue
+            try:
+                rows.append([float(parts[0]), float(parts[1]), float(parts[2])])
+            except ValueError:
+                continue
+    if not rows:
+        raise ValueError(f"`{data_path}` 无有效数据行。")
+    return np.asarray(rows, dtype=np.float32)  # [N, 3]
 
-    # 加载模型
-    pred_process = Process(model_path=model_path)
 
-    # 读取数据文件（假设是两列的txt文件）
-    try:
-        data = np.loadtxt(data_path)  # 加载数据文件
-        if data.ndim == 1:
-            raise ValueError("数据文件应该包含两列")
-        if data.shape[1] != 2:
-            raise ValueError(f"期望2列数据，得到{data.shape[1]}列")
-    except Exception as e:
-        raise ValueError(f"Error loading data file: {e}")
+def load_static_labels(label_path: str):
+    rows = []
+    with open(label_path, "r", encoding="utf-8") as f:
+        for ln, line in enumerate(f, 1):
+            parts = _split_numbers(line)
+            if len(parts) < 4:
+                raise ValueError(f"`{label_path}` 行 {ln} 标签列不足(期望≥4)。")
+            try:
+                rows.append([float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])])
+            except ValueError:
+                raise ValueError(f"`{label_path}` 行 {ln} 标签解析失败。")
+    if not rows:
+        raise ValueError(f"`{label_path}` 无有效标签行。")
+    return np.asarray(rows, dtype=np.float32)  # [M, 4]
 
-    # 滑动窗口参数
-    window_size = 128  # 窗口大小
-    step_size = 64  # 步长
-    num_windows = (len(data) - window_size) // step_size + 1
 
-    pred_results = []  # 存储所有预测结果
+def make_windows_features(
+    data_3col: np.ndarray,
+    labels_4col: np.ndarray,
+    processor: Process,
+    window_size: int = 200,
+    step_size: int = 200,
+):
+    """
+    data_3col: [N, 3]
+    labels_4col: [M, 4]
+    返回:
+      features_list: List[np.ndarray] each [C, L]
+      refs_4d: np.ndarray [K, 4] 每个窗口对应4维ref(取覆盖标签均值)
+      win_starts: np.ndarray [K]
+    """
+    N = int(data_3col.shape[0])
+    M = int(labels_4col.shape[0])
+    W, S = int(window_size), int(step_size)
+    points_per_label = W  # 与 train.py 一致: W 个点对应 1 个标签
 
-    print(f"数据总行数: {len(data)}")
-    print(f"滑动窗口数量: {num_windows}")
-    print("开始预测...")
+    features_list = []
+    refs_list = []
+    win_starts = []
 
-    # 滑窗处理
-    for i in range(num_windows):
-        start = i * step_size
-        end = start + window_size
+    for i in range(0, N - W + 1, S):
+        label_start = i // points_per_label
+        label_end = (i + W - 1) // points_per_label + 1
+        if label_start >= M:
+            break
+        label_end = min(label_end, M)
 
-        # 提取窗口数据 [128, 2]
-        window_data = data[start:end]
+        window = data_3col[i: i + W]  # [W, 3]
 
-        # 转置为 [2, 128] 格式（与训练时一致）
-        window_data = window_data.T
+        # 每个窗口的 ref: 取覆盖到的标签均值 -> [4]
+        label_mean = labels_4col[label_start:label_end].mean(axis=0).astype(np.float32)  # [4]
+        refs_list.append(label_mean)
 
-        # 使用模型进行预测
-        pred = pred_process.process_window(window_data)  # 返回 [max_val, min_val]
-        pred_results.append(pred)
+        window_data = np.stack(
+            [window[:, 0].astype(np.float32), window[:, 1].astype(np.float32), window[:, 2].astype(np.float32)],
+            axis=0,
+        )  # [3, W]
+        feat = processor.build_features(window_data)  # [C, L]
+        features_list.append(feat.astype(np.float32))
+        win_starts.append(i)
 
-        if (i + 1) % 100 == 0:
-            print(f"已处理: {i + 1}/{num_windows} 窗口")
+    if not features_list:
+        raise ValueError("滑窗后没有生成任何窗口，请检查数据长度/窗口大小/步长。")
 
-    # 转换为numpy数组
-    pred_results = np.array(pred_results)  # [num_windows, 2]
+    refs_4d = np.stack(refs_list, axis=0).astype(np.float32)  # [K, 4]
+    return features_list, refs_4d, np.asarray(win_starts, dtype=np.int64)
 
-    print(f"预测完成！共生成 {len(pred_results)} 个预测结果")
-    print(f"每个预测包含2个值：[最大值, 最小值]")
 
-    # 构造时间轴（以窗口为单位）
-    window_time = np.arange(len(pred_results))
+def run_inference(
+    weights_path: str,
+    data_path: str = "./data/static/data.txt",
+    label_path: str = "./data/static/label.txt",
+    out_csv: str = "./output/static_pred.csv",
+    out_fig: str = "./output/static_pred_vs_ref.png",
+    window_size: int = 200,
+    step_size: int = 200,
+    ref_col_index: int = 0,  # 保留参数但不再影响 2x2 对比；需要只看某一列可用于别处
+):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # 真实标签
-    true_labels = None
-    try:
-        true_labels = np.loadtxt(label_path)  # 加载真实标签文件
-        max_col1 = np.max(true_labels[:, 0])  # 第一列最大值
-        min_col1 = np.min(true_labels[:, 0])  # 第一列最小值
-        max_col2 = np.max(true_labels[:, 1])  # 第二列最大值
-        min_col2 = np.min(true_labels[:, 1])  # 第二列最小值
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+    os.makedirs(os.path.dirname(out_fig), exist_ok=True)
 
-        print(f"第一列范围: 最小值={min_col1}, 最大值={max_col1}")
-        print(f"第二列范围: 最小值={min_col2}, 最大值={max_col2}")
-    except Exception as e:
-        print(f"无法加载真实标签文件 {label_path}: {e}")
+    data_3col = load_static_data(data_path)
+    labels_4col = load_static_labels(label_path)
 
-    # 确保预测结果和真实标签长度匹配
-    if true_labels is not None:
-        min_len = min(len(pred_results), len(true_labels))
-        pred_results = pred_results[:min_len]
-        true_labels = true_labels[:min_len]
-        window_time = window_time[:min_len]
-        print(f"对齐后的数据长度: {min_len}")
+    processor = Process(model_path=None)
+    feats, refs_4d, win_starts = make_windows_features(
+        data_3col,
+        labels_4col,
+        processor,
+        window_size=window_size,
+        step_size=step_size,
+    )
 
-    # 图1：原始数据 + 预测/真实 + 误差 + Bland-Altman
-    plt.figure(figsize=(10, 8))
-    # 子图1：原始数据的两列
-    plt.subplot(3, 2, 1)
-    data_time = np.arange(len(data))
-    plt.plot(data_time, data[:, 0], label="PPG", alpha=0.7)
-    plt.plot(data_time, data[:, 1], label="Motion", alpha=0.7)
-    plt.xlabel("Data Point")
-    plt.ylabel("Value")
-    plt.title("Original Data")
-    plt.legend()
-    plt.grid(True)
+    model = Trans(input_len=window_size).to(device)
+    state = torch.load(weights_path, map_location=device)
+    model.load_state_dict(state)
+    model.eval()
 
-    # 子图2：预测的最大值 vs 真实最大值
-    plt.subplot(3, 2, 2)
-    plt.plot(window_time, pred_results[:, 0], label="Predicted SBP", color='red', linewidth=2)
-    if true_labels is not None:
-        plt.plot(window_time, true_labels[:, 0], label="True SBP", color='darkred', linewidth=2, linestyle='--')
-    plt.xlabel("Window Index")
-    plt.ylabel("Max Value")
-    plt.title("Maximum Values: Predicted vs True")
-    plt.legend()
-    plt.grid(True)
+    preds = []
+    with torch.no_grad():
+        for feat in feats:
+            x = torch.from_numpy(feat).unsqueeze(0).float().to(device)  # [1, C, L]
+            y = model(x).squeeze(0).detach().cpu().numpy().astype(np.float32)  # [4]
+            preds.append(y)
+    preds = np.stack(preds, axis=0)  # [K, 4]
 
-    # 子图3：预测的最小值 vs 真实最小值
-    plt.subplot(3, 2, 3)
-    plt.plot(window_time, pred_results[:, 1], label="Predicted DBP", color='blue', linewidth=2)
-    if true_labels is not None:
-        plt.plot(window_time, true_labels[:, 1], label="True DBP", color='darkblue', linewidth=2, linestyle='--')
-    plt.xlabel("Window Index")
-    plt.ylabel("Min Value")
-    plt.title("Minimum Values: Predicted vs True")
-    plt.legend()
-    plt.grid(True)
+    # 保存 CSV（同时保存 4 维 ref 和 4 维 pred）
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "win_index", "start",
+            "ref_0", "ref_1", "ref_2", "ref_3",
+            "pred_0", "pred_1", "pred_2", "pred_3",
+        ])
+        for k in range(preds.shape[0]):
+            w.writerow(
+                [k, int(win_starts[k])]
+                + [float(v) for v in refs_4d[k].tolist()]
+                + [float(v) for v in preds[k].tolist()]
+            )
 
-    # 子图4：误差分析
-    if true_labels is not None:
-        plt.subplot(3, 2, 4)
-        error_max = pred_results[:, 0] - true_labels[:, 0]
-        error_min = pred_results[:, 1] - true_labels[:, 1]
-        plt.plot(window_time, error_max, label="Max Error", color='red', alpha=0.7)
-        plt.plot(window_time, error_min, label="Min Error", color='blue', alpha=0.7)
-        plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        plt.xlabel("Window Index")
-        plt.ylabel("Error (Predicted - True)")
-        plt.title("Prediction Errors")
-        plt.legend()
-        plt.grid(True)
+    # 画图：pred[d] vs ref[d]，2x2 子图
+    t = np.arange(preds.shape[0], dtype=np.int64)
 
-        # Bland-Altman图 - SBP
-        plt.subplot(3, 2, 5)
-        mean_sbp = (pred_results[:-5, 0] + true_labels[:-5, 0]) / 2
-        diff_sbp = pred_results[:-5, 0] - true_labels[:-5, 0]
-        mean_diff_sbp = np.mean(diff_sbp)
-        std_diff_sbp = np.std(diff_sbp)
-        plt.scatter(mean_sbp, diff_sbp, alpha=0.6, color='red')
-        plt.axhline(y=mean_diff_sbp, color='red', linestyle='-', label=f'Mean Diff: {mean_diff_sbp:.3f}')
-        plt.axhline(y=mean_diff_sbp + 1.96 * std_diff_sbp, color='red', linestyle='--',
-                    label=f'+1.96SD: {mean_diff_sbp + 1.96 * std_diff_sbp:.3f}')
-        plt.axhline(y=mean_diff_sbp - 1.96 * std_diff_sbp, color='red', linestyle='--',
-                    label=f'-1.96SD: {mean_diff_sbp - 1.96 * std_diff_sbp:.3f}')
-        plt.xlabel('Mean of Predicted and True SBP')
-        plt.ylabel('Difference (Predicted - True)')
-        plt.title('Bland-Altman Plot - SBP')
-        plt.legend()
-        plt.grid(True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7), sharex=True)
+    axes = axes.reshape(-1)
 
-        # Bland-Altman图 - DBP
-        plt.subplot(3, 2, 6)
-        mean_dbp = (pred_results[:-5, 1] + true_labels[:-5, 1]) / 2
-        diff_dbp = pred_results[:-5, 1] - true_labels[:-5, 1]
-        mean_diff_dbp = np.mean(diff_dbp)
-        std_diff_dbp = np.std(diff_dbp)
-        plt.scatter(mean_dbp, diff_dbp, alpha=0.6, color='blue')
-        plt.axhline(y=mean_diff_dbp, color='blue', linestyle='-', label=f'Mean Diff: {mean_diff_dbp:.3f}')
-        plt.axhline(y=mean_diff_dbp + 1.96 * std_diff_dbp, color='blue', linestyle='--',
-                    label=f'+1.96SD: {mean_diff_dbp + 1.96 * std_diff_dbp:.3f}')
-        plt.axhline(y=mean_diff_dbp - 1.96 * std_diff_dbp, color='blue', linestyle='--',
-                    label=f'-1.96SD: {mean_diff_dbp - 1.96 * std_diff_dbp:.3f}')
-        plt.xlabel('Mean of Predicted and True DBP')
-        plt.ylabel('Difference (Predicted - True)')
-        plt.title('Bland-Altman Plot - DBP')
-        plt.legend()
-        plt.grid(True)
+    for d in range(4):
+        ax = axes[d]
+        ax.plot(t, refs_4d[:, d], label=f"ref[{d}](label mean)", linewidth=1.6)
+        ax.plot(t, preds[:, d], label=f"pred[{d}]", linewidth=1.6)
+        ax.set_title(f"Dim {d}: pred[{d}] vs ref[{d}]")
+        ax.set_ylabel("Value")
+        ax.grid(True, linewidth=0.3, alpha=0.6)
+        ax.legend(loc="best")
 
-    plt.tight_layout()
-    fig1_path = os.path.normpath(os.path.join(result_dir, "overview_analysis.png"))
-    plt.savefig(fig1_path, dpi=300)
-    plt.close()
-    print(f"图像已保存: {fig1_path}")
+    axes[2].set_xlabel("Window index")
+    axes[3].set_xlabel("Window index")
 
-    # 图2：相关性分析（仅当有真实标签时）
-    if true_labels is not None:
-        plt.figure(figsize=(12, 5))
+    fig.suptitle("Static inference: pred vs ref (time series)", y=0.98)
+    fig.tight_layout()
+    fig.savefig(out_fig, dpi=200)
+    plt.close(fig)
 
-        # SBP散点图和拟合直线
-        plt.subplot(1, 2, 1)
-        pred_sbp = pred_results[:, 0]
-        true_sbp = true_labels[:, 0]
-        correlation_sbp, p_value_sbp = stats.pearsonr(pred_sbp, true_sbp)
-        r2_sbp = r2_score(true_sbp, pred_sbp)
-        slope_sbp, intercept_sbp, _, _, _ = stats.linregress(true_sbp, pred_sbp)
-        plt.scatter(true_sbp, pred_sbp, alpha=0.6, color='red', s=20)
-        x_line = np.array([np.min(true_sbp), np.max(true_sbp)])
-        y_line = slope_sbp * x_line + intercept_sbp
-        plt.plot(x_line, y_line, 'red', linewidth=2, label=f'y={slope_sbp:.3f}x+{intercept_sbp:.3f}')
-        plt.plot(x_line, x_line, 'black', linestyle='--', alpha=0.5, label='y=x')
-        plt.xlabel('True SBP')
-        plt.ylabel('Predicted SBP')
-        plt.title(f'SBP Correlation Analysis\nR²={r2_sbp:.4f}, r={correlation_sbp:.4f}, p={p_value_sbp:.4f}')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-
-        # DBP散点图和拟合直线
-        plt.subplot(1, 2, 2)
-        pred_dbp = pred_results[:, 1]
-        true_dbp = true_labels[:, 1]
-        correlation_dbp, p_value_dbp = stats.pearsonr(pred_dbp, true_dbp)
-        r2_dbp = r2_score(true_dbp, pred_dbp)
-        slope_dbp, intercept_dbp, _, _, _ = stats.linregress(true_dbp, pred_dbp)
-        plt.scatter(true_dbp, pred_dbp, alpha=0.6, color='blue', s=20)
-        x_line = np.array([np.min(true_dbp), np.max(true_dbp)])
-        y_line = slope_dbp * x_line + intercept_dbp
-        plt.plot(x_line, y_line, 'blue', linewidth=2, label=f'y={slope_dbp:.3f}x+{intercept_dbp:.3f}')
-        plt.plot(x_line, x_line, 'black', linestyle='--', alpha=0.5, label='y=x')
-        plt.xlabel('True DBP')
-        plt.ylabel('Predicted DBP')
-        plt.title(f'DBP Correlation Analysis\nR²={r2_dbp:.4f}, r={correlation_dbp:.4f}, p={p_value_dbp:.4f}')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        fig2_path = os.path.normpath(os.path.join(result_dir, "correlation_analysis.png"))
-        plt.savefig(fig2_path, dpi=300)
-        plt.close()
-        print(f"图像已保存: {fig2_path}")
-
-        # 打印相关性统计信息
-        print(f"\n相关性分析结果:")
-        print(f"SBP:")
-        print(f"  皮尔逊相关系数: {correlation_sbp:.6f}")
-        print(f"  R²决定系数: {r2_sbp:.6f}")
-        print(f"  p值: {p_value_sbp:.6f}")
-        print(f"  拟合方程: y = {slope_sbp:.6f}x + {intercept_sbp:.6f}")
-
-        print(f"DBP:")
-        print(f"  皮尔逊相关系数: {correlation_dbp:.6f}")
-        print(f"  R²决定系数: {r2_dbp:.6f}")
-        print(f"  p值: {p_value_dbp:.6f}")
-        print(f"  拟合方程: y = {slope_dbp:.6f}x + {intercept_dbp:.6f}")
-
-    # 添加Bland-Altman统计信息
-    if true_labels is not None:
-        print(f"\nBland-Altman分析:")
-        print(f"SBP:")
-        print(f"  平均差值: {mean_diff_sbp:.6f}")
-        print(f"  差值标准差: {std_diff_sbp:.6f}")
-        print(f"  95%一致性界限: [{mean_diff_sbp - 1.96 * std_diff_sbp:.6f}, {mean_diff_sbp + 1.96 * std_diff_sbp:.6f}]")
-
-        print(f"DBP:")
-        print(f"  平均差值: {mean_diff_dbp:.6f}")
-        print(f"  差值标准差: {std_diff_dbp:.6f}")
-        print(f"  95%一致性界限: [{mean_diff_dbp - 1.96 * std_diff_dbp:.6f}, {mean_diff_dbp + 1.96 * std_diff_dbp:.6f}]")
-
-    # 写入预测结果到文件
-    output_path = os.path.normpath(os.path.join(result_dir, 'prediction_results.txt'))
-    try:
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write("# Window_Index Max_Value Min_Value\n")
-            for i, (max_val, min_val) in enumerate(pred_results):
-                f.write(f"{i} {max_val:.6f} {min_val:.6f}\n")
-        print(f"预测结果已保存到: {output_path}")
-    except Exception as e:
-        raise ValueError(f"Error writing to output file: {e}")
+    print(f"已保存预测CSV: `{out_csv}`")
+    print(f"已保存对比图: `{out_fig}`")
 
 
 if __name__ == "__main__":
-    data_path = "./testdata/ppg_pressure_4.txt"  # 改为你的数据文件
-    model_path = "./model/bp_artifact.pth"       # model_5: SBP:0±5, dbp:3±5
-    label_path = "./testlabel/envelope_4.txt"
-    result_dir = "./"
-    sliding_vad_plot(data_path, model_path, result_dir, label_path)
+    # 把这里改成你要用的权重文件（例如训练输出的某个fold）
+    weights_path = "./model/bp_cv_fold_1.pth"
+
+    run_inference(
+        weights_path=weights_path,
+        data_path="./data/static/data_7.txt",
+        label_path="./label/static/label_7.txt",
+        out_csv="./output/static_pred.csv",
+        out_fig="./output/static_pred_vs_ref.png",
+        window_size=200,
+        step_size=200,
+        ref_col_index=0,
+    )

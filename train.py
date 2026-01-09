@@ -5,7 +5,7 @@ import re
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Dataset, Subset
-from model import Trans, TransNoPressure, TransNoPressDifAttn
+from model import Trans, TransNoDiffAttn, TransNoPressDifAttn
 from process import Process
 import matplotlib.pyplot as plt
 from sklearn.model_selection import KFold
@@ -218,9 +218,18 @@ def train_vitac(
     save_path="./model/bp_artifact_best.pth",
     curve_path=None,
     curve_title=None,
+    log_txt_path=None,
+    log_every=10,
 ):
     device = next(model.parameters()).device
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    # 准备 loss 记录文件
+    if log_txt_path is not None:
+        os.makedirs(os.path.dirname(log_txt_path), exist_ok=True)
+        # 覆盖写入表头
+        with open(log_txt_path, "w", encoding="utf-8") as f:
+            f.write("epoch\ttrain_loss\tval_loss\n")
 
     best_val_loss = float("inf")
     train_losses, val_losses = [], []
@@ -255,12 +264,18 @@ def train_vitac(
         val_loss = val_running / max(1, len(val_loader.dataset))
         val_losses.append(float(val_loss))
 
+        # 按间隔写入 txt（epoch 从 1 开始计数）
+        epoch_1 = epoch + 1
+        if log_txt_path is not None and (epoch_1 % log_every == 0 or epoch_1 == 1 or epoch_1 == num_epochs):
+            with open(log_txt_path, "a", encoding="utf-8") as f:
+                f.write(f"{epoch_1}\t{train_loss:.6f}\t{val_loss:.6f}\n")
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), save_path)
-            print(f"[Epoch {epoch + 1}] val_loss 改进为 {val_loss:.6f}，已保存 `{save_path}`")
+            print(f"[Epoch {epoch_1}] val_loss 改进为 {val_loss:.6f}，已保存 `{save_path}`")
 
-        print(f"Epoch {epoch + 1}/{num_epochs} | train_loss={tf(train_loss)} | val_loss={tf(val_loss)}")
+        print(f"Epoch {epoch_1}/{num_epochs} | train_loss={tf(train_loss)} | val_loss={tf(val_loss)}")
 
     if curve_path is not None:
         plot_loss_curves(
@@ -278,8 +293,8 @@ def tf(x):
 
 
 if __name__ == "__main__":
-    data_dir = "./data/static"
-    label_dir = "./label/static"
+    data_dir = "./data/dynamic"
+    label_dir = "./label/dynamic"
     base_model_dir = "./model"
     os.makedirs(base_model_dir, exist_ok=True)
 
@@ -329,14 +344,15 @@ if __name__ == "__main__":
 
         ''' 模型选择 '''
         # model = Trans(input_len=window_size).to(device)
-        model = TransNoPressure(input_len=window_size).to(device)
-        # model = TransNoPressDifAttn(input_len=window_size).to(device)
+        # model = TransNoDiffAttn(input_len=window_size).to(device)
+        model = TransNoPressDifAttn(input_len=window_size).to(device)
 
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
         save_path = os.path.join(base_model_dir, f"bp_cv_fold_{fold}.pth")
         curve_path = os.path.join(out_dir, f"loss_curve_fold_{fold}.png")
+        log_txt_path = os.path.join(out_dir, f"loss_log_fold_{fold}.txt")
 
         best_loss, train_losses, val_losses = train_vitac(
             model,
@@ -348,6 +364,8 @@ if __name__ == "__main__":
             save_path=save_path,
             curve_path=curve_path,
             curve_title=f"Fold {fold} loss curves",
+            log_txt_path=log_txt_path,
+            log_every=10,
         )
 
         fold_best_losses.append(best_loss)

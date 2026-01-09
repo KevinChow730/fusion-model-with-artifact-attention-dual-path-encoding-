@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import math
 
+
 class CNNModel(nn.Module):
     def __init__(self, input_dim=128, d_model=256, out_num=2):
         super().__init__()
@@ -99,6 +100,7 @@ class CNNModel(nn.Module):
         x = self.out_layer(x)  # [B, out_num]
 
         return x
+
 
 class LSTMModel(nn.Module):
     def __init__(self, input_dim=128, d_model=256, out_num=2, num_layers=3):

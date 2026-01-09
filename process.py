@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from model import Trans, TransNoPressure, TransNoPressDifAttn
+from model import Trans, TransNoDiffAttn, TransNoPressDifAttn
 
 
 class Process:
@@ -19,8 +19,8 @@ class Process:
 
         ''' 模型选择 '''
         # model = Trans(input_len=input_dim, d_model=d_model).to(self.device)
-        model = TransNoPressure(input_len=input_dim, d_model=d_model).to(self.device)
-        # model = TransNoPressDifAttn(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = TransNoDiffAttn(input_len=input_dim, d_model=d_model).to(self.device)
+        model = TransNoPressDifAttn(input_len=input_dim, d_model=d_model).to(self.device)
 
         # 严格加载
         model.load_state_dict(state, strict=True)

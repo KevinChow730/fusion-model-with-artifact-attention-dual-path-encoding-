@@ -85,7 +85,7 @@ class VADDataset(Dataset):
         return sample, label
 
 
-def train_vad(model, train_loader, val_loader, criterion, optimizer, num_epochs=20, save_path="./model/bp_artifact.pth"):
+def train_vad(model, train_loader, val_loader, criterion, optimizer, num_epochs=150, save_path="./model/other.pth"):
     Path("./model").mkdir(exist_ok=True)  # 创建保存目录
     best_val_loss = float('inf')
 
@@ -179,4 +179,4 @@ if __name__ == "__main__":
     print(f"训练集大小: {train_size}, 验证集大小: {val_size}")
 
     train_vad(model, train_loader, val_loader, criterion, optimizer, num_epochs=500)
-    torch.save(model.state_dict(), "./model/bp_artifact_other.pth")
+    torch.save(model.state_dict(), "./model/other.pth")
