@@ -5,7 +5,8 @@ import torch
 from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 
-from model import Trans, TransNoDiffAttn, TransNoPressDifAttn
+from model import Trans, TransNoDiffAttn, TransNoPressDifAttn, TransNoDiffAttnSTOnly
+from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet, MultiResUNet1D
 from process import Process
 
 from train import ViTacDataset
@@ -290,6 +291,30 @@ def plot_correlation(y_true_1d, y_pred_1d, out_path, title="Correlation"):
     print(f"已保存: {out_path}")
 
 
+def save_split_labels_txt(y_train, y_val, y_test, out_path, label_names):
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    rows = []
+    def _add(split_name, y):
+        if y is None or np.size(y) == 0:
+            return
+        y = np.asarray(y).reshape(-1, len(label_names)).astype(np.float32)
+        for i in range(y.shape[0]):
+            rows.append([split_name] + [f"{v:.6f}" for v in y[i].tolist()])
+
+    _add("train", y_train)
+    _add("val", y_val)
+    _add("test", y_test)
+
+    header = ["split"] + label_names
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\t".join(header) + "\n")
+        for r in rows:
+            f.write("\t".join(r) + "\n")
+
+    print(f"已保存: {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="./data/static")
@@ -303,7 +328,7 @@ def main():
     parser.add_argument("--step_size", type=int, default=10)
     args = parser.parse_args()
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.out_dir, exist_ok=True)
 
     processor = Process(model_path=None)
@@ -331,6 +356,14 @@ def main():
     y_train = collect_labels(train_fixed)
     y_val = collect_labels(val_fixed)
     y_test = collect_labels(test_fixed)
+
+    save_split_labels_txt(
+        y_train,
+        y_val,
+        y_test,
+        out_path=os.path.join(args.out_dir, "split_y_train_val_test.txt"),
+        label_names=label_names,
+    )
 
     plot_split_distributions(
         y_train,
@@ -364,14 +397,41 @@ def main():
     # \-\- 原有：在 test 上做模型评估 \-\-
     test_loader = DataLoader(test_fixed, batch_size=args.batch_size, shuffle=False)
 
-    model = Trans(input_len=args.window_size).to(device)
+    # model = Trans(input_len=args.window_size).to(device)
     # model = TransNoDiffAttn(input_len=args.window_size).to(device)
+    # model = TransNoDiffAttnSTOnly(input_len=args.window_size).to(device)
     # model = TransNoPressDifAttn(input_len=args.window_size).to(device)
+
+    # model = BiLSTMModel(input_len=args.window_size).to(device)
+    model = EncoderOnlyTransformer(input_len=args.window_size).to(device)
 
     state = torch.load(args.best_path, map_location=device)
     model.load_state_dict(state)
 
     y_true, y_pred = collect_predictions(model, test_loader, device)
+
+    out_pred_path = os.path.join(args.out_dir, "y_true_y_pred.txt")
+
+    label_names = ["SBP", "DBP", "SpO2", "HR"]
+    header_cols = []
+    for name in label_names:
+        header_cols.append(f"{name}_true")
+    for name in label_names:
+        header_cols.append(f"{name}_pred")
+    for name in label_names:
+        header_cols.append(f"{name}_err")
+
+    table = np.concatenate([y_true, y_pred, (y_true - y_pred)], axis=1).astype(np.float32)
+
+    np.savetxt(
+        out_pred_path,
+        table,
+        fmt="%.6f",
+        delimiter="\t",
+        header="\t".join(header_cols),
+        comments="",
+    )
+    print(f"已保存: {out_pred_path}")
 
     plot_bland_altman(y_true[:, 0], y_pred[:, 0], os.path.join(args.out_dir, "bland_altman_sbp.png"), title="SBP (mmHg)")
     plot_bland_altman(y_true[:, 1], y_pred[:, 1], os.path.join(args.out_dir, "bland_altman_dbp.png"), title="DBP (mmHg)")

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from encode_decode import EncodeBlock, DecodeBlock
+from encode_decode import EncodeBlock, DecodeBlock,EncodeBlockSTOnly
 from diff_attention import CrossDiffAttention
 
 
@@ -266,3 +266,87 @@ class TransNoDiffAttn(nn.Module):
 
         return torch.cat([y_SBP, y_DBP, y_SpO2, y_HR], dim=1)
 
+
+class TransNoDiffAttnSTOnly(nn.Module):
+    """
+    在 TransNoDiffAttn 基础上：
+    - 编码器替换为仅短时路径（EncodeBlockSTOnly）
+    - 不使用 diff-attn，ppg 与 pressure 编码后做加权相加融合
+    输入:  [B, 6, L]
+    输出:  [B, 4]（按 out_num 拼接）
+    """
+    def __init__(self, input_len=200, d_model=256, out_num=1, num_heads=16, drop_p: float = 0):
+        super().__init__()
+        self.input_len = input_len
+        self.d_model = d_model
+
+        self.enc_red = EncodeBlockSTOnly(input_dim=input_len, d_model=d_model)
+        self.enc_ir = EncodeBlockSTOnly(input_dim=input_len, d_model=d_model)
+        self.enc_pressure = EncodeBlockSTOnly(input_dim=input_len, d_model=d_model)
+
+        self.alpha = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+        self.beta = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+
+        self.a = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(0.5, dtype=torch.float32))
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+        # 保留以保证结构/参数接口一致，但 forward 不使用
+        self.cross_attn = CrossDiffAttention(
+            dim=d_model, num_heads=num_heads, qkv_bias=True,
+            attn_drop=drop_p, proj_drop=drop_p, lambda_init=0.8
+        )
+
+        self.dropout_enc = nn.Dropout(p=drop_p)
+        self.dropout_attn = nn.Dropout(p=drop_p)
+
+        self.dec_SBP = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_DBP = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_SpO2 = DecodeBlock(input_dim=input_len, d_model=d_model)
+        self.dec_HR = DecodeBlock(input_dim=input_len, d_model=d_model)
+
+        from model import TaskHead  # 避免片段上下文下的未定义；若同文件内可删除此行
+        self.head_SBP = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_DBP = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_SpO2 = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+        self.head_HR = TaskHead(input_dim=input_len, d_model=d_model, out_num=out_num, drop_p=drop_p)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 3 and x.size(1) == 6 and x.size(2) == self.input_len, \
+            "输入形状应为 [B, 6, input_len]"
+
+        red = x[:, 0:2, :]
+        ir = x[:, 2:4, :]
+        pressure = x[:, 4:6, :]
+
+        enc_red = self.enc_red(red)                      # [B, 1, d_model]
+        enc_ir = self.enc_ir(ir)                         # [B, 1, d_model]
+        pressure_encoded = self.enc_pressure(pressure)   # [B, 1, d_model]
+
+        alpha = self.alpha.view(1, 1, 1)
+        beta = self.beta.view(1, 1, 1)
+        ppg_encoded = alpha * enc_red + beta * enc_ir
+
+        ppg_encoded = self.norm1(ppg_encoded)
+        pressure_encoded = self.norm2(pressure_encoded)
+
+        ppg_encoded = self.dropout_enc(ppg_encoded)
+        pressure_encoded = self.dropout_enc(pressure_encoded)
+
+        a = self.a.view(1, 1, 1)
+        b = self.b.view(1, 1, 1)
+        shared_latent = a * ppg_encoded + b * pressure_encoded
+
+        dec_feat_SBP = self.dec_SBP(shared_latent)
+        dec_feat_DBP = self.dec_DBP(shared_latent)
+        dec_feat_SpO2 = self.dec_SpO2(shared_latent)
+        dec_feat_HR = self.dec_HR(shared_latent)
+
+        y_SBP = self.head_SBP(dec_feat_SBP)
+        y_DBP = self.head_DBP(dec_feat_DBP)
+        y_SpO2 = self.head_SpO2(dec_feat_SpO2)
+        y_HR = self.head_HR(dec_feat_HR)
+
+        return torch.cat([y_SBP, y_DBP, y_SpO2, y_HR], dim=1)

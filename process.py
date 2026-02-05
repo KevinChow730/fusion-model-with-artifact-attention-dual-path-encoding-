@@ -1,6 +1,7 @@
 import numpy as np
 import torch
-from model import Trans, TransNoDiffAttn, TransNoPressDifAttn
+from model import Trans, TransNoDiffAttn, TransNoPressDifAttn, TransNoDiffAttnSTOnly
+from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet
 
 
 class Process:
@@ -20,7 +21,13 @@ class Process:
         ''' 模型选择 '''
         # model = Trans(input_len=input_dim, d_model=d_model).to(self.device)
         # model = TransNoDiffAttn(input_len=input_dim, d_model=d_model).to(self.device)
-        model = TransNoPressDifAttn(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = TransNoDiffAttnSTOnly(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = TransNoPressDifAttn(input_len=input_dim, d_model=d_model).to(self.device)
+
+        # model = MultiResUNet1D(input_len=input_dim).to(self.device)
+        # model = BiLSTMModel(input_len=input_dim).to(self.device)
+        # model = EncoderOnlyTransformer(input_len=input_dim).to(self.device)
+        model = UNet(input_len=input_dim).to(self.device)
 
         # 严格加载
         model.load_state_dict(state, strict=True)

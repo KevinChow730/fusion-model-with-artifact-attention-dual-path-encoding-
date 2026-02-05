@@ -99,6 +99,59 @@ class EncodeBlock(nn.Module):
         return y
 
 
+class EncodeBlockSTOnly(nn.Module):
+    """
+    仅短时流编码（不包含长时流与融合）：
+    - 4层通道提取（核长 1,3,3,3）
+    - 长度投影与压缩与原 EncodeBlock 保持一致
+    输入:  x [B, 2, input_dim]
+    输出:  y [B, 1, d_model]
+    """
+    def __init__(self, input_dim: int, d_model: int, c_mid: int = 64):
+        super().__init__()
+        self.input_dim = input_dim
+        self.d_model = d_model
+
+        c1 = c_mid
+        c2 = c1 * 2
+        c3 = c2 * 2
+        c4 = c3 * 2
+        self.c_feat = c4
+
+        self.conv_c1 = nn.Conv1d(in_channels=2, out_channels=c1, kernel_size=1, bias=False)
+        self.bn_c1 = nn.BatchNorm1d(c1)
+
+        self.conv_c2 = nn.Conv1d(in_channels=c1, out_channels=c2, kernel_size=3, padding=1, bias=False)
+        self.bn_c2 = nn.BatchNorm1d(c2)
+
+        self.conv_c3 = nn.Conv1d(in_channels=c2, out_channels=c3, kernel_size=3, padding=1, bias=False)
+        self.bn_c3 = nn.BatchNorm1d(c3)
+
+        self.conv_c4 = nn.Conv1d(in_channels=c3, out_channels=c4, kernel_size=3, padding=1, bias=False)
+        self.bn_c4 = nn.BatchNorm1d(c4)
+
+        # 长度维投影与压缩（与 EncodeBlock 一致）
+        self.conv_l1 = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=1, bias=False)
+        self.bn_l1 = nn.BatchNorm1d(d_model)
+        self.conv_l2 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=self.c_feat, bias=True)
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 3 and x.size(1) == 2 and x.size(2) == self.input_dim, "输入形状应为 [B, 2, input_dim]"
+
+        st1 = self.relu(self.bn_c1(self.conv_c1(x)))     # [B, c1, L]
+        st2 = self.relu(self.bn_c2(self.conv_c2(st1)))   # [B, c2, L]
+        st3 = self.relu(self.bn_c3(self.conv_c3(st2)))   # [B, c3, L]
+        st4 = self.relu(self.bn_c4(self.conv_c4(st3)))   # [B, c4, L]
+
+        y = st4.transpose(1, 2)                          # [B, L, c4]
+        y = self.relu(self.bn_l1(self.conv_l1(y)))       # [B, d_model, c4]
+        y = self.conv_l2(y)                               # [B, d_model, 1]
+        y = y.transpose(1, 2)                             # [B, 1, d_model]
+        return y
+
+
 class DecodeBlock(nn.Module):
     """
     输入: x [B, 1, d_model]
