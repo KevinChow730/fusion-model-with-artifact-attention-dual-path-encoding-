@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 
 from model import Trans, TransNoDiffAttn, TransNoPressDifAttn, TransNoDiffAttnSTOnly
-from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet, MultiResUNet1D
+from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet
 from process import Process
 
 from train import ViTacDataset
@@ -317,8 +317,8 @@ def save_split_labels_txt(y_train, y_val, y_test, out_path, label_names):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="./data/static")
-    parser.add_argument("--label_dir", type=str, default="./label/static")
+    parser.add_argument("--data_dir", type=str, default="./data/dynamic")
+    parser.add_argument("--label_dir", type=str, default="./label/dynamic")
     parser.add_argument("--best_path", type=str, required=True)
     parser.add_argument("--out_dir", type=str, default="./output")
     parser.add_argument("--window_size", type=int, default=200)
@@ -398,12 +398,12 @@ def main():
     test_loader = DataLoader(test_fixed, batch_size=args.batch_size, shuffle=False)
 
     # model = Trans(input_len=args.window_size).to(device)
-    # model = TransNoDiffAttn(input_len=args.window_size).to(device)
+    model = TransNoDiffAttn(input_len=args.window_size).to(device)
     # model = TransNoDiffAttnSTOnly(input_len=args.window_size).to(device)
     # model = TransNoPressDifAttn(input_len=args.window_size).to(device)
 
     # model = BiLSTMModel(input_len=args.window_size).to(device)
-    model = EncoderOnlyTransformer(input_len=args.window_size).to(device)
+    # model = EncoderOnlyTransformer(input_len=args.window_size).to(device)
 
     state = torch.load(args.best_path, map_location=device)
     model.load_state_dict(state)

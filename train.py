@@ -5,13 +5,13 @@ import re
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Dataset, Subset
-from model import Trans, TransNoDiffAttn, TransNoPressDifAttn, TransNoDiffAttnSTOnly
+from model import FADE, FDE, TransNoPressDifAttn, FE, FE_woP
 from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet
 from process import Process
 import matplotlib.pyplot as plt
 from sklearn.model_selection import KFold
 
-device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class ViTacDataset(Dataset):
@@ -294,8 +294,8 @@ def tf(x):
 
 
 if __name__ == "__main__":
-    data_dir = "./data/static"
-    label_dir = "./label/static"
+    data_dir = "./data/dynamic"
+    label_dir = "./label/dynamic"
     base_model_dir = "./model"
     os.makedirs(base_model_dir, exist_ok=True)
 
@@ -344,15 +344,15 @@ if __name__ == "__main__":
         val_loader = DataLoader(val_fold, batch_size=batch_size, shuffle=False)
 
         ''' 模型选择 '''
-        # model = Trans(input_len=window_size).to(device)
-        # model = TransNoDiffAttn(input_len=window_size).to(device)
-        # model = TransNoPressDifAttn(input_len=window_size).to(device)
-        # model = TransNoDiffAttnSTOnly(input_len=window_size).to(device)
+        # model = FADE(input_len=window_size).to(device)
+        # model = FDE(input_len=window_size).to(device)
+        # model = FE(input_len=window_size).to(device)
+        model = FE_woP(input_len=window_size).to(device)
 
         # model = MultiResUNet1D(input_len=window_size).to(device)
         # model = BiLSTMModel(input_len=window_size).to(device)
         # model = EncoderOnlyTransformer(input_len=window_size).to(device)
-        model = UNet(input_len=window_size).to(device)
+        # model = UNet(input_len=window_size).to(device)
 
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr=1e-3)

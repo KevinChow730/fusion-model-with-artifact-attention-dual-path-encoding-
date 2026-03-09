@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from model import Trans, TransNoDiffAttn, TransNoPressDifAttn, TransNoDiffAttnSTOnly
+from model import FADE, FDE, FE, TransNoPressDifAttn, FE_woP
 from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet
 
 
@@ -19,15 +19,15 @@ class Process:
         d_model, input_dim = int(w.shape[0]), int(w.shape[1])
 
         ''' 模型选择 '''
-        # model = Trans(input_len=input_dim, d_model=d_model).to(self.device)
-        # model = TransNoDiffAttn(input_len=input_dim, d_model=d_model).to(self.device)
-        # model = TransNoDiffAttnSTOnly(input_len=input_dim, d_model=d_model).to(self.device)
-        # model = TransNoPressDifAttn(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = FADE(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = FDE(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = FE(input_len=input_dim, d_model=d_model).to(self.device)
+        model = FE_woP(input_len=input_dim, d_model=d_model).to(self.device)
 
         # model = MultiResUNet1D(input_len=input_dim).to(self.device)
         # model = BiLSTMModel(input_len=input_dim).to(self.device)
         # model = EncoderOnlyTransformer(input_len=input_dim).to(self.device)
-        model = UNet(input_len=input_dim).to(self.device)
+        # model = UNet(input_len=input_dim).to(self.device)
 
         # 严格加载
         model.load_state_dict(state, strict=True)

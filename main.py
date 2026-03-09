@@ -181,12 +181,12 @@ def run_inference(
 
 if __name__ == "__main__":
     # 把这里改成你要用的权重文件（例如训练输出的某个fold）
-    weights_path = "./model/bp_cv_fold_1.pth"
+    weights_path = "./demo/model.pth"
 
     run_inference(
         weights_path=weights_path,
-        data_path="./data/static/data_7.txt",
-        label_path="./label/static/label_7.txt",
+        data_path="./motion_test/data.txt",
+        label_path="./motion_test/label.txt",
         out_csv="./output/static_pred.csv",
         out_fig="./output/static_pred_vs_ref.png",
         window_size=200,
