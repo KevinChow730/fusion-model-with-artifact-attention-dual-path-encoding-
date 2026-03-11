@@ -12,12 +12,12 @@ class EncodeBlock(nn.Module):
         * 融合1：短时 conv2 输出 与 长时 conv1 输出 -> 均值 -> 作为短时 conv3 的输入
         * 融合2：短时 conv4 输出 与 长时 conv2 输出 -> 均值 -> 进入长度投影与压缩
     - 其余部分（长度投影与压缩）保持不变。
-    输入:  x [B, 2, input_dim]
-    输出:  y [B, 1, d_model]
+    输入:  x [B, 2, input_len]
+    输出:  y [B, d_model]
     """
-    def __init__(self, input_dim: int, d_model: int, c_mid: int = 64):
+    def __init__(self, input_len: int, d_model: int, c_mid: int = 64):
         super().__init__()
-        self.input_dim = input_dim
+        self.input_len = input_len
         self.d_model = d_model
 
         # 短时流通道配置：c1,c2,c3,c4(=c_feat)
@@ -49,7 +49,7 @@ class EncodeBlock(nn.Module):
         self.long_bn2   = nn.BatchNorm1d(c4)
 
         # 长度维投影与压缩（保持不变）
-        self.conv_l1 = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=1, bias=False)
+        self.conv_l1 = nn.Conv1d(in_channels=input_len, out_channels=d_model, kernel_size=1, bias=False)
         self.bn_l1   = nn.BatchNorm1d(d_model)
         self.conv_l2 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=self.c_feat, bias=True)
 
@@ -70,7 +70,7 @@ class EncodeBlock(nn.Module):
         return y
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        assert x.dim() == 3 and x.size(1) == 2 and x.size(2) == self.input_dim, "输入形状应为 [B, 2, input_dim]"
+        assert x.dim() == 3 and x.size(1) == 2 and x.size(2) == self.input_len, "输入形状应为 [B, 2, input_len]"
         B, _, L = x.shape
 
         # 短时流前两层
@@ -90,26 +90,33 @@ class EncodeBlock(nn.Module):
         lt2 = self.relu(self.long_bn2(self.long_conv2(lt1)))  # [B, c4, L(+1 或 L)]
         lt2 = self._match_len(st4, lt2)                       # 对齐到 L
         fused4 = 0.5 * (st4 + lt2)                            # [B, c4, L]
-
+        '''
         # 进入原有长度投影与压缩
         y = fused4.transpose(1, 2)                            # [B, L, c4]
         y = self.relu(self.bn_l1(self.conv_l1(y)))            # [B, d_model, c4]
         y = self.conv_l2(y)                                   # [B, d_model, 1]
         y = y.transpose(1, 2)                                  # [B, 1, d_model]
-        return y
+        '''
+        return fused4.transpose(1, 2)                            # [B, L, c4]
 
 
-class EncodeBlockSTOnly(nn.Module):
+class DecodeBlock(nn.Module):
     """
-    仅短时流编码（不包含长时流与融合）：
-    - 4层通道提取（核长 1,3,3,3）
-    - 长度投影与压缩与原 EncodeBlock 保持一致
-    输入:  x [B, 2, input_dim]
-    输出:  y [B, 1, d_model]
+    与当前 EncodeBlock 对称的双流解码（适配 EncodeBlock 输出: [B, L, c_feat]）:
+
+    输入:  x [B, L, c_feat]
+    输出:  y [B, 2, L]
+
+    双流解码：
+    - 短时流：4层通道还原（核长 3,3,3,1）：c4 -> c3 -> c2 -> c1 -> 2
+    - 长时流：2层通道还原（核长 6,6）：c4 -> c2 -> 2（其中第 1 层与短时第 2 层融合；第 2 层与短时第 4 层融合）
+    - 融合（与编码对应）：
+        * 融合1：短时 deconv2 输出 与 长时 deconv1 输出 -> 均值 -> 作为短时 deconv3 的输入
+        * 融合2：短时 deconv4 输出 与 长时 deconv2 输出 -> 均值 -> 输出
     """
-    def __init__(self, input_dim: int, d_model: int, c_mid: int = 64):
+    def __init__(self, input_len: int, d_model: int, c_mid: int = 64):
         super().__init__()
-        self.input_dim = input_dim
+        self.input_len = input_len
         self.d_model = d_model
 
         c1 = c_mid
@@ -118,105 +125,113 @@ class EncodeBlockSTOnly(nn.Module):
         c4 = c3 * 2
         self.c_feat = c4
 
-        self.conv_c1 = nn.Conv1d(in_channels=2, out_channels=c1, kernel_size=1, bias=False)
-        self.bn_c1 = nn.BatchNorm1d(c1)
+        # 短时流：c4 -> c3 -> c2 -> c1 -> 2（核长 3,3,3,1）
+        self.deconv_c4 = nn.ConvTranspose1d(in_channels=c4, out_channels=c3, kernel_size=3, padding=1, bias=False)
+        self.bn_c4 = nn.BatchNorm1d(c3)
 
-        self.conv_c2 = nn.Conv1d(in_channels=c1, out_channels=c2, kernel_size=3, padding=1, bias=False)
-        self.bn_c2 = nn.BatchNorm1d(c2)
+        self.deconv_c3 = nn.ConvTranspose1d(in_channels=c3, out_channels=c2, kernel_size=3, padding=1, bias=False)
+        self.bn_c3 = nn.BatchNorm1d(c2)
 
-        self.conv_c3 = nn.Conv1d(in_channels=c2, out_channels=c3, kernel_size=3, padding=1, bias=False)
-        self.bn_c3 = nn.BatchNorm1d(c3)
+        self.deconv_c2 = nn.ConvTranspose1d(in_channels=c2, out_channels=c1, kernel_size=3, padding=1, bias=False)
+        self.bn_c2 = nn.BatchNorm1d(c1)
 
-        self.conv_c4 = nn.Conv1d(in_channels=c3, out_channels=c4, kernel_size=3, padding=1, bias=False)
-        self.bn_c4 = nn.BatchNorm1d(c4)
+        self.deconv_c1 = nn.ConvTranspose1d(in_channels=c1, out_channels=2, kernel_size=1, bias=True)
 
-        # 长度维投影与压缩（与 EncodeBlock 一致）
-        self.conv_l1 = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=1, bias=False)
-        self.bn_l1 = nn.BatchNorm1d(d_model)
-        self.conv_l2 = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=self.c_feat, bias=True)
+        # 长时流：2 层（核长为短时对应层的 2 倍：6,6）
+        k_long = 6
+        self.long_deconv1 = nn.ConvTranspose1d(in_channels=c4, out_channels=c2,
+                                               kernel_size=k_long, padding=k_long // 2, bias=False)
+        self.long_bn1 = nn.BatchNorm1d(c2)
+
+        self.long_deconv2 = nn.ConvTranspose1d(in_channels=c2, out_channels=2,
+                                               kernel_size=k_long, padding=k_long // 2, bias=True)
+        # 输出通道为 2，一般不再接 BN；如需可自行加
 
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        assert x.dim() == 3 and x.size(1) == 2 and x.size(2) == self.input_dim, "输入形状应为 [B, 2, input_dim]"
-
-        st1 = self.relu(self.bn_c1(self.conv_c1(x)))     # [B, c1, L]
-        st2 = self.relu(self.bn_c2(self.conv_c2(st1)))   # [B, c2, L]
-        st3 = self.relu(self.bn_c3(self.conv_c3(st2)))   # [B, c3, L]
-        st4 = self.relu(self.bn_c4(self.conv_c4(st3)))   # [B, c4, L]
-
-        y = st4.transpose(1, 2)                          # [B, L, c4]
-        y = self.relu(self.bn_l1(self.conv_l1(y)))       # [B, d_model, c4]
-        y = self.conv_l2(y)                               # [B, d_model, 1]
-        y = y.transpose(1, 2)                             # [B, 1, d_model]
+    @staticmethod
+    def _match_len(ref: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        将 y 在最后一维对齐到 ref 的长度（偶数卷积核可能导致长度 +/-1，这里裁剪或右侧补零对齐）
+        """
+        L_ref = ref.size(-1)
+        L_y = y.size(-1)
+        if L_y > L_ref:
+            return y[..., :L_ref]
+        if L_y < L_ref:
+            pad = L_ref - L_y
+            return F.pad(y, (0, pad), mode="constant", value=0.0)
         return y
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 3 and x.size(2) == self.c_feat, r"输入形状应为 \[B, L, c\_feat\]"
+        # [B, L, c_feat] -> [B, c_feat, L]
+        y = x.transpose(1, 2)
 
-class DecodeBlock(nn.Module):
+        # 短时流前两层：c4 -> c3 -> c2
+        st1 = self.relu(self.bn_c4(self.deconv_c4(y)))     # [B, c3, L]
+        st2 = self.relu(self.bn_c3(self.deconv_c3(st1)))   # [B, c2, L]
+
+        # 长时流第一层：c4 -> c2，并与 st2 融合
+        lt1 = self.relu(self.long_bn1(self.long_deconv1(y)))  # [B, c2, L(+1 或 L)]
+        lt1 = self._match_len(st2, lt1)
+        fused2 = 0.5 * (st2 + lt1)                          # [B, c2, L]
+
+        # 融合结果作为短时第三层输入：c2 -> c1
+        st3 = self.relu(self.bn_c2(self.deconv_c2(fused2)))  # [B, c1, L]
+        st4 = self.deconv_c1(st3)                            # [B, 2,  L]
+
+        # 长时流第二层：c2 -> 2（输入用 lt1），与 st4 融合输出
+        lt2 = self.long_deconv2(lt1)                         # [B, 2, L(+1 或 L)]
+        lt2 = self._match_len(st4, lt2)
+        out = 0.5 * (st4 + lt2)                              # [B, 2, L]
+        return out
+
+
+class EncodeBlockSTOnly(nn.Module):
     """
-    输入: x [B, 1, d_model]
-    输出: y [B, 2, input_dim]
-    反卷积解码流程(对称):
-      1) 在长度维上: 1 -> c_feat
-      2) 长度投影回 input_dim
-      3) 通道还原(4层, 每层÷2): c4(=c_feat) -> c3 -> c2 -> c1(=c_mid) -> 2
+    仅短时流编码：
+    - 只使用短时流：4层通道提取（核长 1,3,3,3）
+    - 不使用长时流和融合操作
+    - 保持与EncodeBlock相同的输入输出格式
+    输入:  x [B, 2, input_len]
+    输出:  y [B, L, c_feat] (与EncodeBlock保持一致)
     """
-    def __init__(self, input_dim: int, d_model: int, c_mid: int = 64):
+    def __init__(self, input_len: int, d_model: int, c_mid: int = 64):
         super().__init__()
-        self.input_dim = input_dim
+        self.input_len = input_len
         self.d_model = d_model
 
-        # 通道链条（与编码对称）
+        # 短时流通道配置：c1,c2,c3,c4(=c_feat)
         c1 = c_mid
         c2 = c1 * 2
         c3 = c2 * 2
         c4 = c3 * 2  # = c_feat
         self.c_feat = c4
 
-        # 在长度维上展开: [B, d_model, 1] -> [B, d_model, c_feat]
-        self.deconv_l1 = nn.ConvTranspose1d(in_channels=d_model, out_channels=d_model,
-                                            kernel_size=self.c_feat, bias=True)
-        self.bn_l1 = nn.BatchNorm1d(d_model)
+        # 短时流 4层通道提取（核长 1,3,3,3）
+        self.conv_c1 = nn.Conv1d(in_channels=2,  out_channels=c1, kernel_size=1, bias=False)
+        self.bn_c1   = nn.BatchNorm1d(c1)
 
-        # 长度维投影回 input_dim（1x1 反卷积）
-        self.deproj = nn.ConvTranspose1d(in_channels=d_model, out_channels=input_dim,
-                                         kernel_size=1, bias=False)
-        self.bn_lp = nn.BatchNorm1d(input_dim)
+        self.conv_c2 = nn.Conv1d(in_channels=c1, out_channels=c2, kernel_size=3, padding=1, bias=False)
+        self.bn_c2   = nn.BatchNorm1d(c2)
 
-        # 转置后做通道还原（保持长度=input_dim）
-        self.deconv_c4 = nn.ConvTranspose1d(in_channels=self.c_feat, out_channels=c3,
-                                            kernel_size=3, padding=1, bias=False)
-        self.bn_c4 = nn.BatchNorm1d(c3)
+        self.conv_c3 = nn.Conv1d(in_channels=c2, out_channels=c3, kernel_size=3, padding=1, bias=False)
+        self.bn_c3   = nn.BatchNorm1d(c3)
 
-        self.deconv_c3 = nn.ConvTranspose1d(in_channels=c3, out_channels=c2,
-                                            kernel_size=3, padding=1, bias=False)
-        self.bn_c3 = nn.BatchNorm1d(c2)
-
-        self.deconv_c2 = nn.ConvTranspose1d(in_channels=c2, out_channels=c1,
-                                            kernel_size=3, padding=1, bias=False)
-        self.bn_c2 = nn.BatchNorm1d(c1)
-
-        self.deconv_c1 = nn.ConvTranspose1d(in_channels=c1, out_channels=2,
-                                            kernel_size=1, bias=True)
+        self.conv_c4 = nn.Conv1d(in_channels=c3, out_channels=c4, kernel_size=3, padding=1, bias=False)
+        self.bn_c4   = nn.BatchNorm1d(c4)
 
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        assert x.dim() == 3 and x.size(1) == 1 and x.size(2) == self.d_model, "输入形状应为 [B, 1, d_model]"
+        assert x.dim() == 3 and x.size(1) == 2 and x.size(2) == self.input_len, "输入形状应为 [B, 2, input_len]"
+        B, _, L = x.shape
 
-        # [B, 1, d_model] -> [B, d_model, 1]
-        y = x.transpose(1, 2)
+        # 仅短时流四层处理
+        st1 = self.relu(self.bn_c1(self.conv_c1(x)))          # [B, c1, L]
+        st2 = self.relu(self.bn_c2(self.conv_c2(st1)))        # [B, c2, L]
+        st3 = self.relu(self.bn_c3(self.conv_c3(st2)))        # [B, c3, L]
+        st4 = self.relu(self.bn_c4(self.conv_c4(st3)))        # [B, c4, L]
 
-        # 长度维展开与投影回 input_dim
-        y = self.relu(self.bn_l1(self.deconv_l1(y)))          # [B, d_model, c_feat]
-        y = self.relu(self.bn_lp(self.deproj(y)))             # [B, input_dim, c_feat]
-
-        # 转回通道优先
-        y = y.transpose(1, 2)                                 # [B, c_feat, input_dim]
-
-        # 4层通道还原: c4 -> c3 -> c2 -> c1 -> 2
-        y = self.relu(self.bn_c4(self.deconv_c4(y)))          # [B, c3, L]
-        y = self.relu(self.bn_c3(self.deconv_c3(y)))          # [B, c2, L]
-        y = self.relu(self.bn_c2(self.deconv_c2(y)))          # [B, c1, L]
-        y = self.deconv_c1(y)                                 # [B, 2, L]
-        return y
+        return st4.transpose(1, 2)                             # [B, L, c4]

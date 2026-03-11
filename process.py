@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from model import FADE, FDE, FE, TransNoPressDifAttn, FE_woP
+from model import FADE, FDE, FE, FE_woP
 from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet
 
 
@@ -19,10 +19,10 @@ class Process:
         d_model, input_dim = int(w.shape[0]), int(w.shape[1])
 
         ''' 模型选择 '''
-        # model = FADE(input_len=input_dim, d_model=d_model).to(self.device)
+        model = FADE(input_len=input_dim, d_model=d_model).to(self.device)
         # model = FDE(input_len=input_dim, d_model=d_model).to(self.device)
         # model = FE(input_len=input_dim, d_model=d_model).to(self.device)
-        model = FE_woP(input_len=input_dim, d_model=d_model).to(self.device)
+        # model = FE_woP(input_len=input_dim, d_model=d_model).to(self.device)
 
         # model = MultiResUNet1D(input_len=input_dim).to(self.device)
         # model = BiLSTMModel(input_len=input_dim).to(self.device)

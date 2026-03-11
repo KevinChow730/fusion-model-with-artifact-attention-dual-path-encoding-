@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 
-from model import Trans, TransNoDiffAttn, TransNoPressDifAttn, TransNoDiffAttnSTOnly
+from model import FADE, FDE, FE, TransNoPressDifAttn, FE_woP
 from other_model import BiLSTMModel, EncoderOnlyTransformer, UNet
 from process import Process
 
@@ -317,8 +317,8 @@ def save_split_labels_txt(y_train, y_val, y_test, out_path, label_names):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="./data/dynamic")
-    parser.add_argument("--label_dir", type=str, default="./label/dynamic")
+    parser.add_argument("--data_dir", type=str, default="./data/static")
+    parser.add_argument("--label_dir", type=str, default="./label/static")
     parser.add_argument("--best_path", type=str, required=True)
     parser.add_argument("--out_dir", type=str, default="./output")
     parser.add_argument("--window_size", type=int, default=200)
@@ -397,10 +397,10 @@ def main():
     # \-\- 原有：在 test 上做模型评估 \-\-
     test_loader = DataLoader(test_fixed, batch_size=args.batch_size, shuffle=False)
 
-    # model = Trans(input_len=args.window_size).to(device)
-    model = TransNoDiffAttn(input_len=args.window_size).to(device)
-    # model = TransNoDiffAttnSTOnly(input_len=args.window_size).to(device)
-    # model = TransNoPressDifAttn(input_len=args.window_size).to(device)
+    model = FADE(input_len=args.window_size).to(device)
+    # model = FDE(input_len=args.window_size).to(device)
+    # model = FE(input_len=args.window_size).to(device)
+    # model = FE_woP(input_len=args.window_size).to(device)
 
     # model = BiLSTMModel(input_len=args.window_size).to(device)
     # model = EncoderOnlyTransformer(input_len=args.window_size).to(device)
