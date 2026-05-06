@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# Track ONLY .py files
+# -----------------------------
+# Ignore everything by default
+*
+
+# But keep directories so we can unignore files inside
+!*/
+
+# Allow Python source files anywhere
+!**/*.py
+
+# Keep this ignore file
+!.gitignore
+
+# Explicitly ignore common non-code folders (keeps status clean)
+data/
+label/
+dataset/
+motiontest/
+output/
+model/
+__pycache__/
