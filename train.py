@@ -294,8 +294,8 @@ def tf(x):
 
 
 if __name__ == "__main__":
-    data_dir = "./data/static"
-    label_dir = "./label/static"
+    data_dir = "./data/dynamic"
+    label_dir = "./label/dynamic"
     base_model_dir = "./model"
     os.makedirs(base_model_dir, exist_ok=True)
 
@@ -305,7 +305,7 @@ if __name__ == "__main__":
     augment = True
     window_size = 200
     batch_size = 16
-    num_epochs = 150
+    num_epochs = 20
     seed = 42
 
     processor = Process(model_path=None)
@@ -344,8 +344,8 @@ if __name__ == "__main__":
         val_loader = DataLoader(val_fold, batch_size=batch_size, shuffle=False)
 
         ''' 模型选择 '''
-        model = FADE(input_len=window_size).to(device)
-        # model = FDE(input_len=window_size).to(device)
+        # model = FADE(input_len=window_size).to(device)
+        model = FDE(input_len=window_size).to(device)
         # model = FE(input_len=window_size).to(device)
         # model = FE_woP(input_len=window_size).to(device)
 
@@ -372,7 +372,7 @@ if __name__ == "__main__":
             curve_path=curve_path,
             curve_title=f"Fold {fold} loss curves",
             log_txt_path=log_txt_path,
-            log_every=10,
+            log_every=1,
         )
 
         fold_best_losses.append(best_loss)
