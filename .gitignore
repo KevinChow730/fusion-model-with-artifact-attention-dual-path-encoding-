@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project generated / caches
+output/
+
+# Data & labels (often large/private) - keep if you want to publish them
+# data/
+# label/
+# dataset/
+
+# Large artifacts
+*.npz
+*.png
+*.csv
+*.log
+*.pt
+*.pth
+*.ckpt
+
